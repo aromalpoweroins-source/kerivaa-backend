@@ -1,0 +1,1055 @@
+KERIVAA
+AI Kerala Trip Planner
+Complete Backend Build Guide — Continue From VS Code Setup
+PURPOSE OF THIS DOCUMENT
+This document contains everything needed to build the complete Kerivaa backend from scratch. It is written for an LLM assistant helping a beginner developer. The user already has VS Code installed, Python 3.14.3, pip 26.0, Ollama running locally with llama3.1, and has created the kerivaa-backend folder with .env, .gitignore, and requirements.txt files inside it.
+Follow every step in exact order. Never skip ahead. After each major step, confirm the output matches what is described before proceeding. The user has no deep coding experience — explain every command in plain English before giving it.
+CURRENT STATE — WHAT IS ALREADY DONE
+VS Code installed and working
+Python 3.14.3 installed
+pip 26.0 installed
+Ollama installed with llama3.1:latest (4.9 GB) downloaded and ready
+kerivaa-backend folder created on Desktop
+Folder opened in VS Code
+packages installed: fastapi, uvicorn, supabase, python-dotenv, requests
+.env file created with placeholder Supabase values and LLM_PROVIDER=ollama
+.gitignore file created
+requirements.txt file created
+NEXT STEP: Create the Python files
+The Kerivaa backend is a Python web server built with FastAPI. It receives trip requests from the Lovable frontend, queries the Supabase database, runs planning logic, calls the local Ollama AI model, and returns a complete itinerary as JSON.
+The 6 Python files we are building
+Every file has exactly one job. Never mix responsibilities between files.
+kerivaa-backend/
+├── .env                 ← secret keys (already created)
+├── .gitignore           ← files GitHub should ignore (already created)
+├── requirements.txt     ← package list (already created)
+├── llm.py               ← ALL AI calls go through here (Ollama/Claude/Groq)
+├── database.py          ← ALL Supabase database queries go here
+├── planner.py           ← ALL itinerary planning logic and rules
+├── intent.py            ← extract structured JSON from user plain English
+├── narrative.py         ← generate travel prose from structured itinerary
+└── main.py              ← FastAPI app, all HTTP endpoints, entry point
+How a request flows through the system
+When a user types their trip request and clicks Plan, here is the exact sequence:
+Lovable frontend sends POST request to Railway URL
+main.py receives request at /plan-from-text endpoint
+intent.py calls llm.py which calls Ollama — extracts structured JSON from plain English
+planner.py runs 5 planning decisions using data from database.py
+narrative.py calls llm.py which calls Ollama — writes travel prose for each day
+main.py returns complete enriched itinerary JSON to Lovable
+Lovable displays the itinerary beautifully to the user
+The 5 planning decisions the engine makes
+These are the rules inside planner.py. They make itineraries realistic and logistically sound.
+Decision 1 — How many destinations: 1-3 days = 1 destination, 4-6 days = 2, 7-10 days = 3, 11+ days = 4 max
+Decision 2 — Which destinations: score by tag match + experience count + season + budget. Only pick destinations reachable within 4.5 hours of each other
+Decision 3 — Days per destination: subtract travel days first, then distribute remaining days by each destination's ideal_days weight
+Decision 4 — Which experiences and order: match tags, max 3 per day, max 1 high-energy per day, morning experiences go first, no duplicate types same day
+Decision 5 — Travel days: travel under 2.5 hours = can still do 1 afternoon experience. Travel over 2.5 hours = arrival only. Travel over 4.5 hours = reject that destination pair entirely
+IMPORTANT INSTRUCTION FOR THE LLM ASSISTANT: Walk the user through one file at a time. After each file is created, ask the user to confirm they saved it before moving to the next. Never give multiple files at once — the user is a beginner and will get overwhelmed.
+FILE 1 — llm.py
+This is the AI layer. ALL calls to Ollama, Claude, or Groq go through this single file. The LLM_PROVIDER value in .env controls which AI service is used. Changing one line in .env switches the entire AI layer — no code changes needed.
+The user currently has LLM_PROVIDER=ollama in their .env file. During development this uses local Ollama for free. When deploying to Railway later, this will be changed to groq or claude in the Railway dashboard environment variables.
+Tell the user: In VS Code left panel, click the New File icon and name it llm.py. Then paste this complete code:
+import os
+import json
+import requests
+from dotenv import load_dotenv
+load_dotenv()
+PROVIDER = os.getenv('LLM_PROVIDER', 'ollama')
+OLLAMA_URL = os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434')
+OLLAMA_MODEL = os.getenv('OLLAMA_MODEL', 'llama3.1')
+def call_llm(prompt: str, max_tokens: int = 1000,
+expect_json: bool = False) -> str:
+if PROVIDER == 'ollama':
+return _call_ollama(prompt, max_tokens, expect_json)
+elif PROVIDER == 'claude':
+return _call_claude(prompt, max_tokens)
+elif PROVIDER == 'groq':
+return _call_groq(prompt, max_tokens)
+else:
+raise ValueError(f'Unknown LLM provider: {PROVIDER}')
+def _call_ollama(prompt: str, max_tokens: int,
+expect_json: bool) -> str:
+payload = {
+'model': OLLAMA_MODEL,
+'prompt': prompt,
+'stream': False,
+'options': {
+'num_predict': max_tokens,
+'temperature': 0.7,
+}
+}
+if expect_json:
+payload['format'] = 'json'
+try:
+response = requests.post(
+f'{OLLAMA_URL}/api/generate',
+json=payload,
+timeout=120
+)
+response.raise_for_status()
+return response.json()['response'].strip()
+except requests.exceptions.ConnectionError:
+raise ConnectionError(
+'Cannot connect to Ollama. '
+'Make sure Ollama is running.'
+)
+except requests.exceptions.Timeout:
+raise TimeoutError(
+'Ollama took too long. '
+'Try a smaller model in .env'
+)
+def _call_claude(prompt: str, max_tokens: int) -> str:
+import anthropic
+client = anthropic.Anthropic(
+api_key=os.getenv('ANTHROPIC_API_KEY')
+)
+message = client.messages.create(
+model='claude-sonnet-4-6',
+max_tokens=max_tokens,
+messages=[{'role': 'user', 'content': prompt}]
+)
+return message.content[0].text.strip()
+def _call_groq(prompt: str, max_tokens: int) -> str:
+from groq import Groq
+client = Groq(api_key=os.getenv('GROQ_API_KEY'))
+completion = client.chat.completions.create(
+model='llama-3.1-8b-instant',
+messages=[{'role': 'user', 'content': prompt}],
+max_tokens=max_tokens,
+temperature=0.7
+)
+return completion.choices[0].message.content.strip()
+After pasting, press Ctrl+S to save. Confirm the file appears in the left panel.
+TEST THIS FILE: In the terminal type:
+python -c "from llm import call_llm; print(call_llm('Say hello in 5 words'))"
+Ollama will think for 10-30 seconds then print a short response. If you see a response, llm.py is working. If you see ConnectionError, type 'ollama serve' in a separate terminal first.
+FILE 2 — database.py
+This file handles ALL communication with the Supabase database. No other file should ever query Supabase directly — all database access goes through the functions defined here.
+The Supabase URL and key in .env are currently placeholder values. The user will replace them with real values when they set up Supabase in Stage 3. For now, database.py will be created but the functions cannot be tested until Supabase is configured.
+Create a new file called database.py and paste this complete code:
+import os
+from supabase import create_client
+from dotenv import load_dotenv
+load_dotenv()
+supabase = create_client(
+os.getenv('SUPABASE_URL'),
+os.getenv('SUPABASE_KEY')
+)
+def get_all_destinations(budget: str) -> list:
+"""Get all destinations matching the budget level."""
+result = supabase.table('destinations') \
+.select('*') \
+.eq('budget_level', budget) \
+.execute()
+return result.data
+def get_experiences_for_destination(destination_id: int) -> list:
+"""Get all experiences for a destination, best first."""
+result = supabase.table('experiences') \
+.select('*') \
+.eq('destination_id', destination_id) \
+.execute()
+data = result.data
+data.sort(
+key=lambda x: float(x.get('popularity_score', 1.0)),
+reverse=True
+)
+return data
+def get_travel_time(from_id: int, to_id: int) -> float:
+"""
+Get travel hours between two destinations.
+Returns 999 if the pair is not in the database.
+999 means — never use this route.
+"""
+result = supabase.table('travel_times') \
+.select('travel_hours') \
+.eq('from_destination_id', from_id) \
+.eq('to_destination_id', to_id) \
+.execute()
+if result.data:
+return float(result.data[0]['travel_hours'])
+return 999
+def save_interaction_log(session_id: str, user_text: str,
+intent: dict, itinerary: dict) -> None:
+"""Log every trip generation for analytics."""
+import json
+try:
+supabase.table('interaction_logs').insert({
+'session_id': session_id,
+'user_text': user_text,
+'intent_json': json.dumps(intent),
+'itinerary_json': json.dumps(itinerary),
+'destinations_shown': itinerary.get('destinations', [])
+}).execute()
+except Exception as e:
+print(f'Logging error (non-fatal): {e}')
+Press Ctrl+S to save. No test yet — this requires Supabase to be set up first.
+FILE 3 — planner.py
+This is the most important file in the entire system. It contains all 5 planning decisions that turn a trip request into a logistically sound itinerary. It uses NO AI — pure Python logic reading from the database.
+This file is long. Make sure the user pastes ALL of it. If they accidentally miss the bottom half, the server will crash with a NameError when the endpoint is called.
+Create a new file called planner.py and paste this complete code:
+from datetime import date
+from database import (
+get_all_destinations,
+get_experiences_for_destination,
+get_travel_time
+)
+# ── HELPERS ──────────────────────────────────────────────────────
+def parse_tags(tag_string: str) -> list:
+"""Convert 'romantic,slow,water' to ['romantic','slow','water']."""
+if not tag_string:
+return []
+return [t.strip().lower() for t in tag_string.split(',')]
+def parse_ideal_days(val) -> float:
+"""Convert '2-3' or '2' or 2 to a midpoint float."""
+val = str(val).strip()
+if '-' in val:
+parts = val.split('-')
+return (float(parts[0]) + float(parts[1])) / 2
+try:
+return float(val)
+except:
+return 2.0
+def count_matching_experiences(dest_id: int,
+user_styles: list) -> int:
+"""How many experiences at this destination match user styles?"""
+experiences = get_experiences_for_destination(dest_id)
+count = 0
+for exp in experiences:
+exp_tags = parse_tags(exp.get('tags', ''))
+if any(s in exp_tags for s in user_styles):
+count += 1
+return count
+def score_destination(dest: dict, user_styles: list,
+user_budget: str, user_month: int,
+matching_exp_count: int) -> float:
+"""
+Score how well a destination fits the user request.
+Returns 0.0 to 1.0. Higher is better.
+"""
+dest_tags = parse_tags(dest.get('tags', ''))
+matches = sum(1 for s in user_styles if s in dest_tags)
+tag_score = matches / len(user_styles) if user_styles else 0
+exp_score = min(matching_exp_count / 5, 1.0)
+season_score = 1.0
+if user_month and dest.get('best_season'):
+good_months = []
+for m in dest['best_season'].split(','):
+m = m.strip()
+if m.isdigit():
+good_months.append(int(m))
+if good_months and user_month not in good_months:
+season_score = 0.5
+budget_score = 1.0 if dest.get('budget_level') == user_budget else 0.7
+final = (
+tag_score    * 0.45 +
+exp_score    * 0.30 +
+season_score * 0.15 +
+budget_score * 0.10
+)
+return round(final, 3)
+def pick_experiences_for_day(dest_id: int, user_styles: list,
+used_exp_ids: set,
+max_hours: float = 8,
+max_count: int = 3,
+pace: str = 'moderate') -> list:
+"""
+Pick the best experiences for one day at a destination.
+Respects energy balance, time limits, and avoids repeats.
+"""
+all_exp = get_experiences_for_destination(dest_id)
+candidates = []
+for exp in all_exp:
+if exp['id'] in used_exp_ids:
+continue
+exp_tags = parse_tags(exp.get('tags', ''))
+if any(s in exp_tags for s in user_styles):
+candidates.append(exp)
+def sort_key(e):
+time_order = {
+'morning': 0, 'any': 1,
+'afternoon': 2, 'evening': 3
+}
+time_score = time_order.get(
+e.get('best_time_of_day', 'any'), 1
+)
+pop_score = float(e.get('popularity_score', 1.0))
+return (time_score, -pop_score)
+candidates.sort(key=sort_key)
+if pace == 'slow':
+max_count = min(max_count, 2)
+max_hours = 6
+elif pace == 'packed':
+max_hours = 10
+selected = []
+total_hours = 0
+high_energy_count = 0
+seen_categories = set()
+for exp in candidates:
+if len(selected) >= max_count:
+break
+exp_hours = float(exp.get('duration_hours', 2))
+exp_energy = exp.get('energy_level', 'low')
+exp_tags = parse_tags(exp.get('tags', ''))
+if total_hours + exp_hours > max_hours:
+continue
+if exp_energy == 'high' and high_energy_count >= 1:
+continue
+main_tag = exp_tags[0] if exp_tags else 'general'
+if main_tag in seen_categories:
+continue
+seen_categories.add(main_tag)
+selected.append(exp)
+total_hours += exp_hours
+if exp_energy == 'high':
+high_energy_count += 1
+used_exp_ids.add(exp['id'])
+return selected
+def format_experience(exp: dict) -> dict:
+"""Clean an experience row for the API response."""
+return {
+'id': exp['id'],
+'name': exp['name'],
+'duration_hours': float(exp.get('duration_hours', 2)),
+'energy_level': exp.get('energy_level', 'low'),
+'tags': exp.get('tags', ''),
+'best_time_of_day': exp.get('best_time_of_day', 'any'),
+'hidden_gem': exp.get('hidden_gem', False)
+}
+# ── MAIN PLANNING FUNCTION ───────────────────────────────────────
+def plan_trip(duration: int, budget: str,
+styles: list, month: int = None) -> dict:
+"""
+Main planning engine.
+Takes trip parameters and returns a structured itinerary dict.
+No AI used here — pure logic.
+"""
+if month is None:
+month = date.today().month
+pace = 'slow' if 'slow' in styles else (
+'packed' if 'adventure' in styles else 'moderate')
+# ── Decision 1: How many destinations ────────────────────────
+if duration <= 3:
+max_destinations = 1
+elif duration <= 6:
+max_destinations = 2
+elif duration <= 10:
+max_destinations = 3
+else:
+max_destinations = min(4, duration // 3)
+# ── Decision 2: Which destinations ───────────────────────────
+all_dests = get_all_destinations(budget)
+scored = []
+for dest in all_dests:
+exp_count = count_matching_experiences(dest['id'], styles)
+if exp_count < 2:
+continue
+score = score_destination(
+dest, styles, budget, month, exp_count
+)
+scored.append((score, dest))
+scored.sort(key=lambda x: x[0], reverse=True)
+selected_dests = []
+for score, dest in scored:
+if len(selected_dests) == 0:
+selected_dests.append(dest)
+continue
+if len(selected_dests) >= max_destinations:
+break
+last = selected_dests[-1]
+travel_hrs = get_travel_time(last['id'], dest['id'])
+if travel_hrs <= 4.5:
+selected_dests.append(dest)
+if not selected_dests:
+return {'error': 'No matching destinations found'}
+# ── Decision 3: Days per destination ─────────────────────────
+num_moves = len(selected_dests) - 1
+experience_days = max(1, duration - num_moves)
+total_weight = sum(
+parse_ideal_days(d.get('ideal_days', '2'))
+for d in selected_dests
+)
+days_per_dest = []
+remaining = experience_days
+for i, dest in enumerate(selected_dests):
+if i == len(selected_dests) - 1:
+days = max(1, remaining)
+else:
+weight = parse_ideal_days(dest.get('ideal_days', '2'))
+raw = (weight / total_weight) * experience_days
+days = max(1, round(raw))
+days_per_dest.append(days)
+remaining -= days
+# ── Decisions 4 + 5: Build day by day ────────────────────────
+itinerary = []
+day_number = 1
+used_exp_ids = set()
+for dest_index, dest in enumerate(selected_dests):
+dest_days = days_per_dest[dest_index]
+for day_in_dest in range(dest_days):
+is_travel_arrival = (
+dest_index > 0 and day_in_dest == 0
+)
+if is_travel_arrival:
+prev = selected_dests[dest_index - 1]
+travel_hrs = get_travel_time(
+prev['id'], dest['id']
+)
+if travel_hrs <= 2.5:
+exps = pick_experiences_for_day(
+dest['id'], styles, used_exp_ids,
+max_hours=4, max_count=1, pace='slow'
+)
+day_type = 'travel_and_arrive'
+else:
+exps = []
+day_type = 'travel'
+itinerary.append({
+'day': day_number,
+'type': day_type,
+'destination': dest['name'],
+'travel_from': prev['name'],
+'travel_hours': travel_hrs,
+'experiences': [format_experience(e) for e in exps]
+})
+else:
+exps = pick_experiences_for_day(
+dest['id'], styles, used_exp_ids,
+max_hours=8, max_count=3, pace=pace
+)
+itinerary.append({
+'day': day_number,
+'type': 'experience',
+'destination': dest['name'],
+'region': dest.get('region', ''),
+'experiences': [format_experience(e) for e in exps]
+})
+day_number += 1
+return {
+'total_days': duration,
+'budget': budget,
+'styles': styles,
+'pace': pace,
+'destinations': [d['name'] for d in selected_dests],
+'itinerary': itinerary
+}
+Press Ctrl+S to save. No test yet — requires Supabase data.
+FILE 4 — intent.py
+This file takes whatever the user typed in plain English and converts it to structured JSON that the planner can use. It calls llm.py which calls Ollama. This is where natural language understanding happens.
+This is the first file that actually calls Ollama. When testing, Ollama will take 10-40 seconds to respond on a typical laptop. This is normal. The model needs to load into RAM first, then subsequent calls are faster.
+Create a new file called intent.py and paste this:
+import json
+from llm import call_llm
+def extract_intent(user_text: str) -> dict:
+"""
+Takes plain English trip description.
+Returns structured dict with duration, budget, styles etc.
+Calls Ollama via llm.py.
+"""
+prompt = f"""
+You are a travel intent extractor for Kerivaa, a Kerala trip planner.
+Extract the user intent from the text below.
+Return ONLY a valid JSON object. No explanation. No markdown.
+No text before or after the JSON. Just the raw JSON.
+User text: \"{user_text}\"
+Return exactly this JSON structure:
+{{
+\"duration_days\": <integer, default 5 if unclear>,
+\"budget\": <\"low\" or \"mid\" or \"luxury\">,
+\"styles\": <list of strings from: romantic, adventure, family,
+offbeat, culture, nature, pilgrimage, slow, food,
+heritage, wildlife, beach, water, local>,
+\"group_type\": <\"couple\" or \"family\" or \"solo\" or \"friends\">,
+\"pace\": <\"slow\" or \"moderate\" or \"packed\">
+}}
+Rules:
+- honeymoon or wife or partner or anniversary = romantic, couple
+- kids or children or family = family
+- not touristy or hidden or local = offbeat
+- backwaters = water, slow, romantic
+- trek or hike or adventure = adventure
+- week = 7 days, few days = 4, weekend = 2
+- budget or cheap or low cost = low
+- luxury or premium or high end = luxury
+- Return ONLY valid JSON. Nothing else.
+"""
+raw = call_llm(prompt, max_tokens=400, expect_json=True)
+raw = raw.strip()
+if raw.startswith('```'):
+lines = raw.split('\n')
+raw = '\n'.join(
+l for l in lines
+if not l.startswith('```')
+)
+try:
+result = json.loads(raw)
+if 'duration_days' not in result:
+result['duration_days'] = 5
+if 'budget' not in result:
+result['budget'] = 'mid'
+if 'styles' not in result or not result['styles']:
+result['styles'] = ['nature']
+if 'group_type' not in result:
+result['group_type'] = 'couple'
+if 'pace' not in result:
+result['pace'] = 'moderate'
+return result
+except json.JSONDecodeError as e:
+print(f'Intent JSON parse failed: {e}')
+print(f'Raw output was: {raw[:200]}')
+return {
+'duration_days': 5,
+'budget': 'mid',
+'styles': ['nature'],
+'group_type': 'couple',
+'pace': 'moderate'
+}
+Press Ctrl+S to save.
+TEST THIS FILE: In the terminal type:
+python -c "from intent import extract_intent; import json; print(json.dumps(extract_intent('5 day romantic honeymoon Kerala backwaters'), indent=2))"
+This will take 15-40 seconds. Expected output is a clean JSON object like:
+{
+"duration_days": 5,
+"budget": "mid",
+"styles": ["romantic", "slow", "water"],
+"group_type": "couple",
+"pace": "slow"
+}
+If you get valid JSON back, intent.py is working correctly. The exact styles may vary slightly — that is fine.
+FILE 5 — narrative.py
+This file takes the structured itinerary from planner.py and uses Ollama to write beautiful travel prose for each day. This is where the itinerary stops being a list of data and starts reading like a travel magazine.
+Narrative generation takes longer than intent extraction — typically 30-90 seconds on a laptop with llama3.1. The output quality is good but slightly below Claude. For development and testing this is perfectly fine. The llm.py switching system means you can upgrade to Claude later by changing one environment variable.
+Create a new file called narrative.py and paste this:
+from llm import call_llm
+def generate_narrative(itinerary: dict, styles: list) -> dict:
+"""
+Takes structured itinerary dict.
+Adds a narrative paragraph to each day.
+Returns enriched itinerary with narrative field on each day.
+"""
+style_string = ', '.join(styles)
+itinerary_text = ''
+for day in itinerary.get('itinerary', []):
+exp_list = ', '.join(
+[e['name'] for e in day.get('experiences', [])]
+)
+dest = day.get('destination', '')
+day_type = day.get('type', 'experience')
+if day_type == 'travel':
+from_dest = day.get('travel_from', '')
+hrs = day.get('travel_hours', 0)
+itinerary_text += (
+f"Day {day['day']}: Travel from {from_dest} "
+f"to {dest} ({hrs} hours)\n"
+)
+else:
+itinerary_text += (
+f"Day {day['day']} in {dest}: {exp_list}\n"
+)
+prompt = f"""You are a premium Kerala travel writer for Kerivaa.
+Write a beautiful day-by-day travel narrative for this Kerala itinerary.
+The traveller style is: {style_string}
+Itinerary:
+{itinerary_text}
+Writing rules:
+- One paragraph per day. 4-5 sentences each.
+- Be specific to Kerala: mention backwater canals, spice smells,
+tea garden mist at dawn, Chinese fishing nets, monsoon light,
+village life, temple bells, coconut groves.
+- Tone: warm and personal, like a knowledgeable local friend writing to you.
+- Do NOT use these words: hidden gem, paradise, breathtaking,
+off the beaten path, gem, magical.
+- Start each day with exactly: Day [N] — [Destination Name]
+- For travel days write about the journey itself — what you see
+from the window, how the landscape changes.
+- Return ONLY the narrative text. No headings. No JSON. No markdown.
+"""
+narrative_text = call_llm(prompt, max_tokens=2000)
+paragraphs = [p.strip() for p in narrative_text.split('\n\n')
+if p.strip()]
+enriched_days = []
+for i, day in enumerate(itinerary.get('itinerary', [])):
+day_copy = dict(day)
+day_copy['narrative'] = (
+paragraphs[i] if i < len(paragraphs) else ''
+)
+enriched_days.append(day_copy)
+return {**itinerary, 'itinerary': enriched_days}
+Press Ctrl+S to save. No test yet — requires a full itinerary to narrate.
+FILE 6 — main.py
+This is the entry point of the entire application. It creates the FastAPI web server, defines all the HTTP endpoints, and connects all the other files together. This is what Railway runs when you deploy.
+The CORS middleware lines are critical. Without them, the Lovable frontend will get a CORS error and cannot communicate with this server. Make sure those lines are included exactly as written.
+Create a new file called main.py and paste this:
+import uuid
+from datetime import datetime
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import List, Optional
+from planner import plan_trip
+from intent import extract_intent
+from narrative import generate_narrative
+from database import save_interaction_log
+app = FastAPI(title='Kerivaa Planning Engine')
+# CORS — allows Lovable frontend to call this API
+app.add_middleware(
+CORSMiddleware,
+allow_origins=['*'],
+allow_credentials=True,
+allow_methods=['*'],
+allow_headers=['*'],
+)
+# ── REQUEST MODELS ───────────────────────────────────────────────
+class TripRequest(BaseModel):
+duration_days: int
+budget: str
+styles: List[str]
+month: Optional[int] = None
+class TextRequest(BaseModel):
+text: str
+class FeedbackRequest(BaseModel):
+session_id: str
+rating: Optional[int] = None
+itinerary_saved: Optional[bool] = False
+itinerary_shared: Optional[bool] = False
+time_spent_seconds: Optional[int] = None
+# ── ENDPOINTS ────────────────────────────────────────────────────
+@app.get('/')
+def root():
+return {
+'name': 'Kerivaa Planning Engine',
+'status': 'running',
+'version': '1.0'
+}
+@app.get('/health')
+def health():
+return {
+'status': 'healthy',
+'time': datetime.utcnow().isoformat()
+}
+@app.post('/plan')
+def plan_structured(request: TripRequest):
+"""
+Endpoint 1: structured input.
+Receives duration, budget, styles as structured data.
+Returns itinerary WITHOUT narrative (faster).
+Used by the filter-based form in Lovable.
+"""
+result = plan_trip(
+duration=request.duration_days,
+budget=request.budget,
+styles=request.styles,
+month=request.month
+)
+return result
+@app.post('/plan-from-text')
+def plan_from_text(request: TextRequest):
+"""
+Endpoint 2: natural language input.
+Receives plain English trip description.
+Extracts intent with Ollama, plans trip, writes narrative.
+Returns complete enriched itinerary.
+Used by the text input box in Lovable.
+"""
+session_id = str(uuid.uuid4())
+intent = extract_intent(request.text)
+structured = plan_trip(
+duration=intent['duration_days'],
+budget=intent['budget'],
+styles=intent['styles'],
+month=intent.get('month')
+)
+if 'error' in structured:
+return {
+'error': structured['error'],
+'session_id': session_id
+}
+enriched = generate_narrative(structured, intent['styles'])
+try:
+save_interaction_log(
+session_id, request.text, intent, enriched
+)
+except Exception as e:
+print(f'Logging failed (non-fatal): {e}')
+return {
+**enriched,
+'session_id': session_id,
+'intent_extracted': intent
+}
+@app.post('/feedback')
+def record_feedback(request: FeedbackRequest):
+"""
+Endpoint 3: user feedback.
+Called by Lovable when user rates or saves an itinerary.
+"""
+from database import supabase
+try:
+supabase.table('interaction_logs') \
+.update({
+'rating': request.rating,
+'itinerary_saved': request.itinerary_saved,
+'itinerary_shared': request.itinerary_shared,
+'time_spent_seconds': request.time_spent_seconds
+}) \
+.eq('session_id', request.session_id) \
+.execute()
+return {'status': 'logged'}
+except Exception as e:
+return {'status': 'error', 'detail': str(e)}
+Press Ctrl+S to save.
+Step 1 — Make sure Ollama is running
+Open a SECOND terminal window (not the VS Code terminal — a separate window). Type:
+ollama serve
+You should see: Listening on 127.0.0.1:11434. Leave this terminal open. Do not close it.
+If you see 'address already in use' — Ollama is already running in the background, which is fine. Close this terminal.
+Step 2 — Start the FastAPI server
+Back in the VS Code terminal, make sure you are in the kerivaa-backend folder. Type:
+uvicorn main:app --reload
+You should see:
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process
+INFO:     Application startup complete.
+The --reload flag means the server automatically restarts whenever you save a file change. Very useful during development.
+If you see ImportError or ModuleNotFoundError — one of your files has a typo or the package is not installed. Read the error message carefully — it tells you exactly which line failed.
+Step 3 — Test in the browser
+Open your browser and go to:
+http://localhost:8000
+You should see: {"name": "Kerivaa Planning Engine", "status": "running", "version": "1.0"}
+Now go to:
+http://localhost:8000/docs
+This opens FastAPI's automatic interactive testing page. You can test all your endpoints here without writing any code.
+Step 4 — Test intent extraction at /docs
+On the /docs page, click on POST /plan-from-text, then click 'Try it out', then paste this into the Request body:
+{
+"text": "5 day slow romantic trip for my wife and me, love backwaters"
+}
+Click Execute. Wait 20-60 seconds. Ollama is thinking.
+Expected: you will see an error about Supabase connection — this is correct and expected. It means intent extraction worked (you will see intent_extracted in the response or error) but the planner could not query the database because Supabase is not set up yet. This confirms your AI layer is working.
+If you see a proper JSON response with intent_extracted field containing duration_days, budget, styles — perfect. If you see ConnectionError to Supabase — also expected and fine.
+Step 5 — Test intent extraction directly
+Open a new terminal (keep uvicorn running in the first one). Type:
+python -c "from intent import extract_intent; import json; result = extract_intent('7 day family adventure Kerala wildlife'); print(json.dumps(result, indent=2))"
+Expected output — something like:
+{
+"duration_days": 7,
+"budget": "mid",
+"styles": ["family", "adventure", "wildlife"],
+"group_type": "family",
+"pace": "packed"
+}
+Complete this section only after all 6 Python files are created and the server starts without errors. The database connection is needed for the planner to work but not for intent extraction testing.
+Step 1 — Create Supabase account and project
+Go to supabase.com and sign up for free
+Click New Project
+Name it: kerivaa
+Choose region: Southeast Asia (Singapore) — closest to India
+Set a database password — save it somewhere safe
+Click Create new project — wait 2 minutes for it to provision
+Step 2 — Get your API keys
+In Supabase dashboard click Settings (gear icon) in left sidebar
+Click API
+Copy the Project URL — looks like: https://abcdefghijkl.supabase.co
+Copy the anon public key — the long string starting with eyJ
+Open .env in VS Code and replace the placeholder values:
+SUPABASE_URL=https://your-actual-project-id.supabase.co
+SUPABASE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...your-actual-key
+Save .env with Ctrl+S
+Stop uvicorn with Ctrl+C and restart it: uvicorn main:app --reload
+Step 3 — Create the 4 database tables
+In Supabase dashboard, click SQL Editor in the left sidebar. Paste and run each block below separately.
+Run this first — creates the destinations table:
+create table destinations (
+id bigserial primary key,
+name text not null,
+region text,
+tags text,
+ideal_days text,
+budget_level text,
+best_season text,
+description text,
+hidden_gem boolean default false,
+latitude float8,
+longitude float8,
+zone text,
+popularity_score float8 default 1.0
+);
+Run this second — creates the experiences table:
+create table experiences (
+id bigserial primary key,
+name text not null,
+destination_id bigint references destinations(id),
+tags text,
+duration_hours float8 default 2,
+cost text,
+energy_level text default 'low',
+weather_dependent boolean default false,
+best_time_of_day text default 'any',
+hidden_gem boolean default false,
+includes_stay boolean default false,
+popularity_score float8 default 1.0
+);
+Run this third — creates the travel_times table:
+create table travel_times (
+id bigserial primary key,
+from_destination_id bigint references destinations(id),
+to_destination_id bigint references destinations(id),
+travel_hours float8 not null,
+transport_mode text default 'car'
+);
+Run this fourth — creates the interaction_logs table for analytics:
+create table interaction_logs (
+id bigserial primary key,
+created_at timestamp default now(),
+session_id text,
+user_text text,
+intent_json jsonb,
+itinerary_json jsonb,
+destinations_shown text[],
+time_spent_seconds int,
+itinerary_saved boolean default false,
+itinerary_shared boolean default false,
+rating int,
+feedback_text text,
+device_type text
+);
+Step 4 — Add test data to verify connection
+Run this in SQL Editor to add one test destination and one experience:
+insert into destinations
+(name, region, tags, ideal_days, budget_level,
+best_season, description, hidden_gem, zone)
+values
+('Alleppey', 'Central Kerala',
+'romantic,slow,water,backwaters',
+'2-3', 'mid', '10,11,12,1,2,3',
+'The backwater capital of Kerala. Houseboat cruises, village
+canals, and slow mornings on the water.',
+false, 'central');
+insert into experiences
+(name, destination_id, tags, duration_hours,
+cost, energy_level, best_time_of_day, hidden_gem)
+values
+('Houseboat overnight stay', 1,
+'romantic,water,slow', 16,
+'high', 'low', 'any', false),
+('Kainakary village canoe ride', 1,
+'romantic,slow,local,offbeat', 2,
+'low', 'low', 'morning', true),
+('Village walk at sunset', 1,
+'slow,local,nature', 2,
+'low', 'low', 'evening', false);
+insert into travel_times
+(from_destination_id, to_destination_id, travel_hours, transport_mode)
+values (1, 1, 0, 'none');
+Step 5 — Test the full connection
+In VS Code terminal (with uvicorn stopped), run:
+python -c "from database import get_all_destinations; print(get_all_destinations('mid'))"
+Expected: you see a list with the Alleppey destination data. If you see it, your database connection is working.
+Now start uvicorn again and test the /plan endpoint at /docs with:
+{
+"duration_days": 3,
+"budget": "mid",
+"styles": ["romantic", "slow"]
+}
+Expected: a structured itinerary JSON with Alleppey, 3 days, and experiences listed. This confirms the full pipeline from request to database to response is working.
+Once you have at least one destination with experiences in Supabase and Ollama running, test the complete pipeline.
+Full pipeline test command
+In VS Code terminal with uvicorn running, go to http://localhost:8000/docs and test POST /plan-from-text with:
+{
+"text": "3 day slow romantic trip in Kerala backwaters"
+}
+This triggers the complete flow: Ollama extracts intent, planner queries Supabase, Ollama writes narrative. Takes 30-90 seconds.
+Expected full response structure:
+{
+"total_days": 3,
+"budget": "mid",
+"styles": ["romantic", "slow", "water"],
+"pace": "slow",
+"destinations": ["Alleppey"],
+"itinerary": [
+{
+"day": 1,
+"type": "experience",
+"destination": "Alleppey",
+"experiences": [...],
+"narrative": "Day 1 — Alleppey\nYour Kerala story begins..."
+}
+],
+"session_id": "uuid-here",
+"intent_extracted": {
+"duration_days": 3,
+"budget": "mid",
+"styles": ["romantic", "slow", "water"],
+...
+}
+}
+If you see this structure with real narrative text in the narrative field — your Kerivaa backend is fully working.
+The planning engine is only as good as the data in your database. Add data in Google Sheets first, then import as CSV into Supabase.
+Column rules — critical
+Column headers: always lowercase with underscores — ideal_days not IdealDays
+tags column: comma-separated lowercase no spaces — romantic,slow,water
+budget_level values: exactly low or mid or luxury — nothing else
+energy_level values: exactly low or medium or high
+transport_mode values: exactly car or bus or ferry or train
+hidden_gem: TRUE or FALSE (Google Sheets capitalises automatically)
+ideal_days: store as text — write 2-3 for a range or 2 for fixed
+travel_hours: decimal number — 4.5 not 4:30
+Approved tag vocabulary — only use these words
+Travel style: romantic, family, solo, friends, honeymoon, adventure, offbeat, pilgrimage
+Pace: slow, moderate, packed, relaxed
+Nature: water, hill, forest, beach, backwaters, wildlife, waterfalls
+Activity: heritage, culture, food, ayurveda, photography, local, nature, active
+Kerala zones — add zone column to destinations
+north — Wayanad, Kannur, Kozhikode, Bekal, Thalassery
+central — Kochi, Thrissur, Alleppey, Kumarakom, Kottayam
+south — Varkala, Kovalam, Trivandrum, Kollam, Ponmudi
+hills_central — Munnar, Vagamon, Thekkady, Idukki
+hills_north — Wayanad hills, Silent Valley area
+Travel times strategy
+Do not add every possible pair. Only add: all pairs within the same zone, adjacent zone pairs, and famous cross-zone routes. Any missing pair returns 999 hours which auto-rejects that route. Target: 150-200 rows total, not 249,500.
+Importing from Google Sheets to Supabase
+In Google Sheets: File → Download → Comma-separated values (.csv)
+In Supabase: Table Editor → click table name → Import data from CSV
+Map columns in the import dialog — make sure id is excluded (Supabase auto-generates it)
+Click Import — data appears immediately
+Complete this section only after the full pipeline test in Section 5 passes successfully on your local machine. Never deploy broken code.
+Step 1 — Create GitHub account and repository
+Go to github.com and create a free account if you do not have one
+Click New repository
+Name it: kerivaa-backend
+Set to Private
+Do NOT initialise with README
+Click Create repository
+GitHub shows you setup commands — copy the remote URL
+Step 2 — Push your code to GitHub
+In VS Code terminal:
+git init
+git add .
+git commit -m "initial kerivaa backend"
+git branch -M main
+git remote add origin https://github.com/your-username/kerivaa-backend.git
+git push -u origin main
+When prompted for password, use a GitHub Personal Access Token (not your GitHub password). Create one at: github.com → Settings → Developer Settings → Personal access tokens → Tokens classic → New token → check repo scope.
+Step 3 — Deploy on Railway
+Go to railway.app and sign up with GitHub
+Click New Project → Deploy from GitHub repo
+Select your kerivaa-backend repository
+Railway detects Python automatically and starts building
+Step 4 — Add environment variables in Railway
+In Railway dashboard, click your service → Variables tab → Add these one by one:
+SUPABASE_URL         = your-supabase-project-url
+SUPABASE_KEY         = your-supabase-anon-key
+LLM_PROVIDER         = groq
+GROQ_API_KEY         = your-groq-api-key
+OLLAMA_MODEL         = llama3.1
+LLM_PROVIDER is set to groq in Railway because Ollama only runs on your local laptop. Groq is a free cloud service that runs the same Llama model. Get a free Groq API key at console.groq.com — takes 2 minutes, no credit card needed.
+Step 5 — Set start command
+In Railway dashboard: Settings tab → Deploy section
+Start Command: uvicorn main:app --host 0.0.0.0 --port $PORT
+Click Save and redeploy
+Step 6 — Install Groq package
+Before deploying, add groq to requirements.txt:
+fastapi
+uvicorn
+supabase
+python-dotenv
+requests
+groq
+Save, then push to GitHub:
+git add .
+git commit -m "add groq to requirements"
+git push
+Railway auto-redeploys when you push to GitHub.
+Step 7 — Get your public URL
+In Railway dashboard, click Settings → Domains → Generate Domain. You get a URL like: https://kerivaa-backend.up.railway.app
+Test it by opening: https://kerivaa-backend.up.railway.app/health
+Expected: {"status": "healthy", "time": "..."} — your backend is live.
+Now that your backend is deployed, tell Lovable to call it. In Lovable, use this prompt:
+Add a text input at the top of the planner page.
+Placeholder text: Describe your ideal Kerala trip in your own words...
+When the user types here and clicks Plan, send a POST request to:
+https://your-railway-url.up.railway.app/plan-from-text
+Request body: { "text": userInputText }
+Show a loading spinner while waiting (this takes 20-60 seconds).
+When response arrives, display the itinerary:
+- Show a summary card at top: trip title, destinations, total days
+- For each day in itinerary array:
+- Show day number and destination name as header
+- Show the narrative field as a styled paragraph
+- Below narrative show each experience name as a bullet
+- At the bottom show Save trip and Share on WhatsApp buttons
+- When Save is clicked, POST to /feedback with:
+{ session_id: response.session_id, itinerary_saved: true }
+Replace https://your-railway-url.up.railway.app with your actual Railway URL.
+Ollama errors
+Error: ConnectionError — Cannot connect to Ollama
+ollama serve
+Run this in a separate terminal and leave it open.
+Error: model not found
+ollama pull llama3.1
+Error: Ollama response is very slow (over 2 minutes)
+Close all other apps. Ollama needs RAM. Or switch to smaller model in .env:
+OLLAMA_MODEL=qwen3.5:0.8b
+Note: qwen3.5 is already downloaded on this machine (1.0 GB). It is much faster but lower quality. Use for testing, switch back to llama3.1 for real use.
+Python/FastAPI errors
+Error: ModuleNotFoundError: No module named X
+pip install X
+Replace X with the module name shown in the error.
+Error: ImportError on startup — usually means a typo in one of your files. Read the full error message — it shows the file name and line number.
+Error: Address already in use (port 8000)
+uvicorn main:app --reload --port 8001
+Supabase errors
+Error: Invalid API key — your SUPABASE_KEY in .env has a space before or after it. Delete and re-paste it.
+Error: relation does not exist — the table was not created. Run the CREATE TABLE SQL again in Supabase SQL editor.
+Error: No matching destinations found — your test data tags do not match the user styles. Check that your destination has tags exactly matching what the request sends. For a romantic,slow request the destination needs romantic or slow in its tags column.
+JSON errors from Ollama
+Sometimes Ollama wraps JSON in markdown code blocks. The intent.py code already handles this. If you still get JSON parse errors, add this to your .env:
+OLLAMA_MODEL=llama3.1
+And make sure the format:json line is in the Ollama payload in llm.py. This forces Ollama to output valid JSON.
+Railway deployment errors
+Build fails — check requirements.txt has all packages. Run pip freeze locally and compare.
+Server crashes on start — check Railway logs. Usually a missing environment variable. Add it in the Variables tab.
+CORS error in browser — make sure the CORSMiddleware lines are in main.py exactly as written.
+Final folder structure
+kerivaa-backend/
+├── .env
+│   └── SUPABASE_URL, SUPABASE_KEY, LLM_PROVIDER,
+│       OLLAMA_BASE_URL, OLLAMA_MODEL
+├── .gitignore
+│   └── .env, __pycache__/, *.pyc, .DS_Store, venv/
+├── requirements.txt
+│   └── fastapi, uvicorn, supabase, python-dotenv, requests, groq
+├── llm.py
+│   └── call_llm() — routes to Ollama/Claude/Groq based on .env
+├── database.py
+│   └── get_all_destinations(), get_experiences_for_destination(),
+│       get_travel_time(), save_interaction_log()
+├── planner.py
+│   └── plan_trip() — all 5 planning decisions, pure Python logic
+├── intent.py
+│   └── extract_intent() — plain English to structured JSON via Ollama
+├── narrative.py
+│   └── generate_narrative() — structured itinerary to travel prose via Ollama
+└── main.py
+└── FastAPI app, CORS, /plan, /plan-from-text, /feedback endpoints
+Environment variables reference
+# Development (local) — in .env file
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_KEY=eyJ...
+LLM_PROVIDER=ollama
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=llama3.1
+# Production (Railway) — set in Railway Variables tab
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_KEY=eyJ...
+LLM_PROVIDER=groq
+GROQ_API_KEY=gsk_...
+Three terminal commands to memorise
+Start server locally:
+uvicorn main:app --reload
+Deploy changes to Railway:
+git add .   &&   git commit -m "description"   &&   git push
+Test a Python file directly:
+python -c "from intent import extract_intent; print(extract_intent('test'))"
+The user currently has all 3 setup files created.
+Start with Section 2 — create llm.py first, test it, then proceed file by file.
+Never give the user more than one file at a time. Confirm each step before proceeding.
