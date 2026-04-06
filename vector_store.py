@@ -1,6 +1,6 @@
 import json
 from database import supabase
-from embeddings import get_embedding
+from embeddings import embed_text
 
 def save_itinerary(user_text: str, itinerary: dict, source: str = 'user', quality: float = 1.0):
     """
@@ -14,7 +14,7 @@ def save_itinerary(user_text: str, itinerary: dict, source: str = 'user', qualit
     combined = f"{user_text} {itin_text}"
     
     # Generate vector embedding
-    vector = get_embedding(combined)
+    vector = embed_text(combined)
     
     # Save to Supabase
     supabase.table('stored_itineraries').insert({
