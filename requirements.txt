@@ -4,4 +4,4 @@ supabase
 python-dotenv
 requests
 groq
-sentence-transformers
+
